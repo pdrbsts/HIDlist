@@ -44,46 +44,64 @@ bool GetUSBParentDevice(const std::string& deviceInstanceID) {
     return false;
 }
 
-// Retrieves and prints the manufacturer string using SetupDiGetDeviceRegistryProperty
+// Converts a wide string property to UTF-8 for console output
+std::string WideToUTF8(const wchar_t* wstr) {
+    if (!wstr) return "";
+    
+    int size_needed = WideCharToMultiByte(CP_UTF8, 0, wstr, -1, NULL, 0, NULL, NULL);
+    std::vector<char> utf8String(size_needed);
+    WideCharToMultiByte(CP_UTF8, 0, wstr, -1, utf8String.data(), size_needed, NULL, NULL);
+    
+    return std::string(utf8String.data());
+}
+
+// Retrieves and prints the manufacturer string using SetupDiGetDeviceRegistryPropertyW
 void PrintDeviceManufacturer(HDEVINFO hDevInfoSet, SP_DEVINFO_DATA& deviceInfoData) {
-    TCHAR manufacturer[256];
-    DWORD propertyRegDataType;
-    if (SetupDiGetDeviceRegistryProperty(
+    WCHAR buffer[256] = {0};
+    DWORD bufferSize = sizeof(buffer);
+    
+    if (SetupDiGetDeviceRegistryPropertyW(
             hDevInfoSet,
             &deviceInfoData,
             SPDRP_MFG,
-            &propertyRegDataType,
-            (BYTE*)manufacturer,
-            sizeof(manufacturer),
+            NULL,
+            (PBYTE)buffer,
+            bufferSize,
             NULL))
     {
-        std::wcout << L"  Manufacturer: " << manufacturer << "\n";
+        std::string utf8Str = WideToUTF8(buffer);
+        std::cout << "  Manufacturer : " << utf8Str << "\n";
     } else {
         std::cout << "  [Error] Could not get manufacturer name: " << GetLastError() << "\n";
     }
 }
 
-// Retrieves and prints the friendly name using SetupDiGetDeviceRegistryProperty
+// Retrieves and prints the device description using SetupDiGetDeviceRegistryPropertyW
 void PrintDeviceFriendlyName(HDEVINFO hDevInfoSet, SP_DEVINFO_DATA& deviceInfoData) {
-    TCHAR friendlyName[256];
-    DWORD propertyRegDataType;
-    if (SetupDiGetDeviceRegistryProperty(
+    WCHAR buffer[256] = {0};
+    DWORD bufferSize = sizeof(buffer);
+    
+    if (SetupDiGetDeviceRegistryPropertyW(
             hDevInfoSet,
             &deviceInfoData,
-            SPDRP_DEVICEDESC, // Changed from SPDRP_MFG to SPDRP_FRIENDLYNAME
-            &propertyRegDataType,
-            (BYTE*)friendlyName,
-            sizeof(friendlyName),
+            SPDRP_DEVICEDESC, // Device description property
+            NULL,
+            (PBYTE)buffer,
+            bufferSize,
             NULL))
     {
-        std::wcout << L"  Friendly Name: " << friendlyName << "\n"; // Updated output message
+        std::string utf8Str = WideToUTF8(buffer);
+        std::cout << "  Device Name  : " << utf8Str << "\n";
     } else {
-        std::cout << "  [Error] Could not get friendly name: " << GetLastError() << "\n"; // Updated error message
+        std::cout << "  [Error] Could not get device description: " << GetLastError() << "\n";
     }
 }
 
-// Enumerates HID devices, checks for USB parent, and prints device details including Product and Serial Number
+// Enumerates HID devices, checks for USB parent, and prints device details
 void ListHIDDevicesWithUSBParents() {
+    // Set console output to UTF-8
+    SetConsoleOutputCP(CP_UTF8);
+    
     HDEVINFO hDevInfo = SetupDiGetClassDevs(&GUID_DEVINTERFACE_HID, NULL, NULL,
                                             DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
     if (hDevInfo == INVALID_HANDLE_VALUE) {
@@ -111,8 +129,8 @@ void ListHIDDevicesWithUSBParents() {
         SP_DEVINFO_DATA deviceInfoData;
         deviceInfoData.cbSize = sizeof(SP_DEVINFO_DATA);
         if (!SetupDiGetDeviceInterfaceDetailA(hDevInfo, &deviceInterfaceData, 
-                                              pDeviceInterfaceDetailData, requiredSize, 
-                                              NULL, &deviceInfoData)) {
+                                             pDeviceInterfaceDetailData, requiredSize, 
+                                             NULL, &deviceInfoData)) {
             std::cout << "  [Error] Failed to get device interface detail.\n";
             i++;
             continue;
@@ -125,18 +143,19 @@ void ListHIDDevicesWithUSBParents() {
             i++;
             continue;
         }
+        
         std::string instanceIDStr(deviceInstanceID);
 
         // Check if the parent is a USB device
         if (GetUSBParentDevice(instanceIDStr)) {
-            std::cout << "  HID Device #" << i << ": " << deviceInstanceID << "\n";
+            std::cout << "  HID Device   : " << deviceInstanceID << "\n";
 
             // Print manufacturer info
             PrintDeviceManufacturer(hDevInfo, deviceInfoData);
-			
-			// Print friendly name
-			PrintDeviceFriendlyName(hDevInfo, deviceInfoData);
-			std::cout << "--------------------------------------------------\n";
+            
+            // Print friendly name
+            PrintDeviceFriendlyName(hDevInfo, deviceInfoData);
+            std::cout << "--------------------------------------------------\n";
         }
         i++;
     }
@@ -144,7 +163,56 @@ void ListHIDDevicesWithUSBParents() {
     SetupDiDestroyDeviceInfoList(hDevInfo);
 }
 
-int main() {
-    ListHIDDevicesWithUSBParents();
+// Function to toggle enable/disable state of a HID device by its instance ID
+bool DisableHIDDevice(const std::string& deviceInstanceID) {
+    DEVINST devInst;
+    CONFIGRET status;
+    ULONG dnStatus, problemNumber;
+
+    status = CM_Locate_DevNodeA(&devInst, (DEVINSTID_A)deviceInstanceID.c_str(), CM_LOCATE_DEVNODE_NORMAL);
+    if (status != CR_SUCCESS) {
+        std::cout << "  [Error] Could not locate device node.\n";
+        return false;
+    }
+
+    status = CM_Get_DevNode_Status(&dnStatus, &problemNumber, devInst, 0);
+    if (status != CR_SUCCESS) {
+        std::cout << "  [Error] Could not get device node status.\n";
+        return false;
+    }
+
+    if (dnStatus & DN_DISABLEABLE) { // Check if the device is disableable
+        if (dnStatus & DN_STARTED) { // Device is currently enabled, so disable it
+            status = CM_Disable_DevNode(devInst, 0);
+            if (status == CR_SUCCESS) {
+                std::cout << "  Device disabled successfully: " << deviceInstanceID << "\n";
+                return true;
+            } else {
+                std::cout << "  [Error] Could not disable device (Error code: " << status << ").\n";
+                return false;
+            }
+        } else { // Device is currently disabled, so enable it
+            status = CM_Enable_DevNode(devInst, 0);
+            if (status == CR_SUCCESS) {
+                std::cout << "  Device enabled successfully: " << deviceInstanceID << "\n";
+                return true;
+            } else {
+                std::cout << "  [Error] Could not enable device (Error code: " << status << ").\n";
+                return false;
+            }
+        }
+    } else {
+        std::cout << "  [Error] Device cannot be disabled/enabled programmatically.\n";
+        return false;
+    }
+}
+
+int main(int argc, char* argv[]) {
+    if (argc > 1) {
+        std::string deviceInstanceID = argv[1];
+        DisableHIDDevice(deviceInstanceID);
+    } else {
+        ListHIDDevicesWithUSBParents();
+    }
     return 0;
 }
